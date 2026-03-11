@@ -6,7 +6,7 @@ import pandas as pd
 # 1. ตั้งค่าหน้าตาของเว็บ (Layout)
 st.set_page_config(page_title="Retail Smart AI - NMF Dashboard", layout="wide")
 
-# 2. โหลดข้อมูล (Caching เพื่อให้โหลดเร็วขึ้น)
+# 2. โหลดข้อมูล
 @st.cache_resource
 def load_all_data():
     P = joblib.load('P_matrix.joblib')
@@ -22,7 +22,7 @@ P, Q, product_lookup, R_final, customer_ids = load_all_data()
 st.title("🛒 ระบบแนะนำสินค้าและวิเคราะห์คุณลักษณะแฝง (NMF)")
 st.markdown("---")
 
-# 4. ส่วนแถบด้านข้าง (Sidebar) สำหรับเลือกข้อมูล
+# 4. ส่วนแถบด้านข้าง (Sidebar)
 with st.sidebar:
     st.header("⚙️ การตั้งค่าระบบ")
     
@@ -32,30 +32,41 @@ with st.sidebar:
         help="พิมพ์ค้นหารหัสลูกค้าในช่องนี้ได้เลย"
     )
     
-    # แปลงรหัสลูกค้าเป็น Index เพื่อใช้กับ Matrix P
     user_idx = customer_ids.index(selected_customer_id)
-    
     top_n = st.slider("จำนวนสินค้าแนะนำต่อราย:", 1, 10, 5)
     
     st.divider()
     st.info(f"💡 ข้อมูลประมวลผลจาก:\n- 40 คุณลักษณะแฝง (K)\n- รหัสลูกค้าปัจจุบัน: {selected_customer_id}")
 
 # 5. ส่วนแสดงผลหลัก
-# สร้าง Tabs เพื่อแยกมุมมองลูกค้า และ มุมมองเจ้าของร้าน (40 Topics)
-tab1, tab2 = st.tabs(["👤 การแนะนำรายบุคคล", "📊 วิเคราะห์ 40 คุณลักษณะแฝง"])
+tab1, tab2 = st.tabs(["👤 การแนะนำสินค้าใหม่รายบุคคล", "📊 วิเคราะห์ 40 คุณลักษณะแฝง"])
 
 with tab1:
     if st.button('🚀 เริ่มประมวลผลการแนะนำ'):
-        # --- คำนวณหาคะแนนการแนะนำ (Matrix Multiplication) ---
-        # สูตร: R_pred = P[user] * Q.T (ในที่นี้ Q ของเราน่าจะเป็นรูป K x Items)
+        # --- 1. คำนวณคะแนนทำนาย (Matrix Multiplication) ---
         user_scores = P[user_idx].dot(Q)
         
-        # ดึงสินค้าที่ได้คะแนนสูงสุด Top-N
-        recommended_indices = user_scores.argsort()[-top_n:][::-1]
+        # --- 2. ดึงประวัติการซื้อเดิม (เพื่อนำไปกรองออก) ---
+        # ตรวจสอบว่าเป็น Sparse Matrix หรือไม่
+        if hasattr(R_final, 'toarray'):
+            user_history = R_final[user_idx].toarray().flatten()
+        else:
+            user_history = R_final[user_idx]
+            
+        # --- 3. สร้างตารางเพื่อกรองสินค้าที่เคยซื้อแล้ว ---
+        rec_df = pd.DataFrame({
+            'item_idx': np.arange(len(user_scores)),
+            'score': user_scores,
+            'already_bought': user_history > 0
+        })
         
-        # --- แสดงกลุ่มพฤติกรรม (Latent Features) ของลูกค้าคนนี้ ---
+        # --- 4. กรองสินค้าที่เคยซื้อออก (เอาเฉพาะ False) และจัดลำดับคะแนนจากมากไปน้อย ---
+        new_items_only = rec_df[rec_df['already_bought'] == False]
+        recommended_indices = new_items_only.sort_values(by='score', ascending=False).head(top_n)['item_idx'].values
+        
+        # --- 5. แสดงวิเคราะห์พฤติกรรม (Latent Features) ---
         user_features = P[user_idx]
-        top_k_indices = user_features.argsort()[-2:][::-1] # ดึง 2 กลุ่มที่เกี่ยวข้องที่สุด
+        top_k_indices = user_features.argsort()[-2:][::-1]
         
         st.subheader(f"🔍 วิเคราะห์พฤติกรรมรหัสลูกค้า: {selected_customer_id}")
         f_col1, f_col2 = st.columns(2)
@@ -66,50 +77,44 @@ with tab1:
         
         st.markdown("---")
 
-        # --- แสดงผลการแนะนำและประวัติ ---
+        # --- 6. แสดงผลการแนะนำและประวัติ ---
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("🌟 สินค้าที่แนะนำสำหรับคุณ")
-            for i, idx in enumerate(recommended_indices):
-                row = product_lookup.iloc[idx]
-                st.write(f"**{i+1}. {row['product_name']}**")
-                st.caption(f"รหัสสินค้า: {row['product_id']}")
+            st.subheader("🌟 สินค้าใหม่ที่คุณอาจสนใจ (ยังไม่เคยซื้อ)")
+            if len(recommended_indices) == 0:
+                st.write("ไม่พบสินค้าแนะนำใหม่")
+            else:
+                for i, idx in enumerate(recommended_indices):
+                    row = product_lookup.iloc[idx]
+                    st.write(f"**{i+1}. {row['product_name']}**")
+                    st.caption(f"รหัสสินค้า: {row['product_id']} | คะแนนความน่าจะเป็น: {user_scores[idx]:.4f}")
                 
         with col2:
             st.subheader("📜 ประวัติการซื้อเดิม (Top History)")
-            user_history = R_final[user_idx].toarray().flatten()
             past_indices = np.where(user_history > 0)[0]
             
             if len(past_indices) == 0:
                 st.warning("ไม่พบประวัติการซื้อ")
             else:
-                # แสดงประวัติการซื้อ (จำกัดที่ 10 รายการ)
                 for idx in past_indices[:10]:
                     name = product_lookup.iloc[idx]['product_name']
                     st.write(f"✅ {name}")
 
 with tab2:
     st.subheader("📊 รายละเอียดคุณลักษณะแฝง (Latent Feature Catalog)")
-    st.markdown("วิเคราะห์สินค้าเด่น 10 อันดับแรกในแต่ละกลุ่มพฤติกรรม (K) เพื่อจัดโปรโมชั่น")
+    st.markdown("วิเคราะห์สินค้าเด่น 10 อันดับแรกในแต่ละกลุ่มพฤติกรรม (K)")
     
-    # เลือก Topic (K) ที่ต้องการดู
     selected_k = st.number_input("ระบุลำดับคุณลักษณะแฝง (Index K):", 1, 40, 1)
     
-    # ดึงค่าน้ำหนักสินค้าใน Topic นั้น (จาก Matrix Q)
-    # หมายเหตุ: ตรวจสอบแกนของ Q (หากเป็น K x Items ให้ใช้ Q[selected_k-1])
-    # หาก Q เป็น Items x K ให้ใช้ Q[:, selected_k-1]
+    # ดึงน้ำหนักสินค้าจาก Matrix Q
     try:
-        # สมมติฐาน: Q มีขนาด (40, จำนวนสินค้า)
         feature_weights = Q[selected_k - 1] 
     except:
-        # กรณี Q มีขนาด (จำนวนสินค้า, 40)
         feature_weights = Q[:, selected_k - 1]
 
-    # หา 10 สินค้าที่มีค่าน้ำหนักสูงสุดในกลุ่มนั้น
     top_item_idx = feature_weights.argsort()[-10:][::-1]
     
-    # สร้างตารางแสดงผล
     topic_data = []
     for idx in top_item_idx:
         item_name = product_lookup.iloc[idx]['product_name']
@@ -118,14 +123,11 @@ with tab2:
         topic_data.append({
             "รหัสสินค้า": p_id,
             "ชื่อสินค้า": item_name,
-            "ค่าน้ำหนักความถี่": f"{weight:.4f}"
+            "ค่าน้ำหนัก": f"{weight:.4f}"
         })
     
     st.table(pd.DataFrame(topic_data))
-    st.info(f"💡 สินค้ากลุ่มนี้คือตัวแทนของคุณลักษณะแฝงที่ {selected_k} ซึ่งถูกคำนวณจากรูปแบบความถี่การซื้อซ้ำในระบบ")
 
 # 6. ส่วนท้าย (Footer)
 st.markdown("---")
-st.caption(f"สถานะ: พร้อมใช้งาน | ฐานข้อมูลลูกค้า: {len(customer_ids)} ราย | ฐานข้อมูลสินค้า: {len(product_lookup)} ราย")
-
-
+st.caption(f"สถานะ: พร้อมใช้งาน | กรองสินค้าที่เคยซื้อออก: เปิดใช้งาน ✅ | ฐานข้อมูลลูกค้า: {len(customer_ids)} ราย")
